@@ -1,5 +1,38 @@
-import { Fragment, useState } from 'react'
-import { BookOpen, Braces, Check, ChevronRight, FlaskConical, Lightbulb, RotateCcw, Sparkles } from 'lucide-react'
+import { Fragment, useEffect, useState } from 'react'
+import { BookOpen, Braces, Check, ChevronRight, Clock3, FlaskConical, Lightbulb, Medal, RotateCcw, Sparkles, Trophy, UserRound, X } from 'lucide-react'
+import { getAnonymousUserId, supabaseClient } from './lib/supabase.js'
+
+const playerStorageKey = 'kidthen-player'
+const scoreStorageKey = 'kidthen-scores'
+const playerEmojis = ['🦊', '🐼', '🐸', '🦉', '🐯', '🐙', '🚀', '🌟', '🎯', '🧠', '⚡', '🌈']
+
+function readStoredValue(key, fallback) {
+  try {
+    return JSON.parse(localStorage.getItem(key)) ?? fallback
+  } catch {
+    return fallback
+  }
+}
+
+function formatDuration(milliseconds) {
+  const totalSeconds = Math.floor(milliseconds / 1000)
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  const tenths = Math.floor((milliseconds % 1000) / 100)
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}.${tenths}`
+}
+
+function currentTimestamp() {
+  return Date.now()
+}
+
+function rankScores(scores) {
+  return [...scores].sort((first, second) => (
+    second.score - first.score ||
+    first.duration_ms - second.duration_ms ||
+    new Date(first.completed_at) - new Date(second.completed_at)
+  ))
+}
 
 const lessons = [
   { id: 'lesson', label: 'ประพจน์คืออะไร', number: '01', icon: BookOpen },
@@ -68,8 +101,28 @@ function App() {
   const [fillOperator, setFillOperator] = useState('and')
   const [fillAnswers, setFillAnswers] = useState({})
   const [fillChecked, setFillChecked] = useState(false)
+  const [fillStartedAt, setFillStartedAt] = useState(null)
+  const [fillFinishedAt, setFillFinishedAt] = useState(null)
+  const [timerNow, setTimerNow] = useState(0)
+  const [completedRun, setCompletedRun] = useState(null)
+  const [scoreNotice, setScoreNotice] = useState('')
   const [questionIndex, setQuestionIndex] = useState(0)
   const [responses, setResponses] = useState({})
+  const [quizStartedAt, setQuizStartedAt] = useState(null)
+  const [quizFinishedAt, setQuizFinishedAt] = useState(null)
+  const [quizRunResult, setQuizRunResult] = useState(null)
+  const [player, setPlayer] = useState(() => readStoredValue(playerStorageKey, null))
+  const [profileOpen, setProfileOpen] = useState(false)
+  const [profileName, setProfileName] = useState('')
+  const [profileEmoji, setProfileEmoji] = useState(playerEmojis[0])
+  const [profileError, setProfileError] = useState('')
+  const [profileSaving, setProfileSaving] = useState(false)
+  const [pendingScore, setPendingScore] = useState(null)
+  const [localScores, setLocalScores] = useState(() => readStoredValue(scoreStorageKey, []))
+  const [leaderboard, setLeaderboard] = useState([])
+  const [leaderboardLoading, setLeaderboardLoading] = useState(false)
+  const [leaderboardError, setLeaderboardError] = useState('')
+  const [leaderboardRefresh, setLeaderboardRefresh] = useState(0)
 
   const operator = operators.find((item) => item.id === activeOperator)
   const fillOperatorDetails = operators.find((item) => item.id === fillOperator)
@@ -90,8 +143,54 @@ function App() {
   const fillRowKey = (row) => fillVariables.map((variable) => row[variable] ? 'T' : 'F').join('-')
   const filledCount = fillRows.filter((row) => typeof fillAnswers[fillRowKey(row)] === 'boolean').length
   const correctFillCount = fillRows.filter((row) => fillAnswers[fillRowKey(row)] === fillEvaluation(row)).length
+  const elapsedMs = fillStartedAt ? Math.max(0, (fillFinishedAt ?? Math.max(timerNow, fillStartedAt)) - fillStartedAt) : 0
+  const quizElapsedMs = quizStartedAt ? Math.max(0, (quizFinishedAt ?? Math.max(timerNow, quizStartedAt)) - quizStartedAt) : 0
+  const rankedScores = rankScores(leaderboard)
+
+  useEffect(() => {
+    const fillIsRunning = practiceMode === 'fill-table' && fillStartedAt && !fillChecked
+    const quizIsRunning = practiceMode === 'questions' && quizStartedAt && !quizFinishedAt
+    if (!fillIsRunning && !quizIsRunning) return undefined
+    const timer = window.setInterval(() => setTimerNow(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [fillChecked, fillStartedAt, practiceMode, quizFinishedAt, quizStartedAt])
+
+  useEffect(() => {
+    if (practiceMode !== 'leaderboard') return undefined
+    let cancelled = false
+
+    async function loadScores() {
+      setLeaderboardLoading(true)
+      setLeaderboardError('')
+      if (!supabaseClient) {
+        setLeaderboard(rankScores(localScores))
+        setLeaderboardLoading(false)
+        return
+      }
+
+      const { data, error } = await supabaseClient
+        .from('logic_scores')
+        .select('id, player_name, player_emoji, score, correct_count, total_count, difficulty, challenge_title, challenge_formula, duration_ms, completed_at')
+        .order('score', { ascending: false })
+        .order('duration_ms', { ascending: true })
+        .limit(50)
+
+      if (cancelled) return
+      if (error) {
+        setLeaderboardError('โหลดอันดับออนไลน์ไม่สำเร็จ ตรวจสอบการตั้งค่า Supabase แล้วลองใหม่')
+        setLeaderboard(rankScores(localScores))
+      } else {
+        setLeaderboard(data ?? [])
+      }
+      setLeaderboardLoading(false)
+    }
+
+    loadScores()
+    return () => { cancelled = true }
+  }, [leaderboardRefresh, localScores, practiceMode])
 
   function resetAnswer() {
+    if (quizFinishedAt) return
     setResponses((current) => {
       const next = { ...current }
       delete next[currentQuestion.id]
@@ -100,13 +199,16 @@ function App() {
   }
 
   function chooseAnswer(value) {
+    if (quizFinishedAt) return
     setResponses((current) => ({
       ...current,
       [currentQuestion.id]: { answer: value, submitted: false },
     }))
+    setQuizStartedAt((current) => current ?? currentTimestamp())
   }
 
   function submitAnswer() {
+    if (quizFinishedAt) return
     setResponses((current) => ({
       ...current,
       [currentQuestion.id]: { ...currentResponse, submitted: true },
@@ -119,32 +221,180 @@ function App() {
 
   function changeFillOperator(operatorId) {
     setFillOperator(operatorId)
-    setFillAnswers({})
-    setFillChecked(false)
+    resetFillTable()
   }
 
   function changeFillLevel(level) {
     const firstChallenge = compoundChallenges.find((challenge) => challenge.level === level)
     setFillLevel(level)
     if (firstChallenge) setFillChallengeId(firstChallenge.id)
-    setFillAnswers({})
-    setFillChecked(false)
+    resetFillTable()
   }
 
   function changeFillChallenge(challengeId) {
     setFillChallengeId(challengeId)
-    setFillAnswers({})
-    setFillChecked(false)
+    resetFillTable()
   }
 
   function selectFillAnswer(row, value) {
     setFillAnswers((current) => ({ ...current, [fillRowKey(row)]: value }))
     setFillChecked(false)
+    setFillFinishedAt(null)
+    setCompletedRun(null)
+    setFillStartedAt((current) => current ?? currentTimestamp())
   }
 
   function resetFillTable() {
     setFillAnswers({})
     setFillChecked(false)
+    setFillStartedAt(null)
+    setFillFinishedAt(null)
+    setCompletedRun(null)
+    setScoreNotice('')
+    setTimerNow(currentTimestamp())
+  }
+
+  function resetQuestionRun() {
+    setResponses({})
+    setQuestionIndex(0)
+    setQuizStartedAt(null)
+    setQuizFinishedAt(null)
+    setQuizRunResult(null)
+    setTimerNow(currentTimestamp())
+    setScoreNotice('')
+  }
+
+  async function finishQuestionRun() {
+    const finishedAt = currentTimestamp()
+    const correctCount = practiceQuestions.filter((question) => (
+      responses[question.id]?.submitted && responses[question.id]?.answer === question.answer
+    )).length
+    const durationMs = Math.max(0, finishedAt - (quizStartedAt ?? finishedAt))
+    const scoreRun = {
+      score: Math.round((correctCount / practiceQuestions.length) * 100),
+      correct_count: correctCount,
+      total_count: practiceQuestions.length,
+      difficulty: 'basic',
+      challenge_title: 'แบบเลือกคำตอบ',
+      challenge_formula: 'ตัวเชื่อมพื้นฐาน 9 ข้อ',
+      duration_ms: durationMs,
+      completed_at: new Date(finishedAt).toISOString(),
+    }
+
+    setQuizFinishedAt(finishedAt)
+    setQuizRunResult(scoreRun)
+    setScoreNotice('')
+    if (player) {
+      await saveScore(scoreRun, player)
+    } else {
+      setPendingScore(scoreRun)
+      setProfileName('')
+      setProfileEmoji(playerEmojis[0])
+      setProfileOpen(true)
+    }
+  }
+
+  function openProfileEditor() {
+    setProfileName(player?.name ?? '')
+    setProfileEmoji(player?.emoji ?? playerEmojis[0])
+    setProfileError('')
+    setProfileOpen(true)
+  }
+
+  function storeLocalScore(scoreRow) {
+    const nextScores = rankScores([scoreRow, ...localScores]).slice(0, 50)
+    localStorage.setItem(scoreStorageKey, JSON.stringify(nextScores))
+    setLocalScores(nextScores)
+  }
+
+  async function saveScore(scoreRun, selectedPlayer) {
+    const localRow = {
+      ...scoreRun,
+      id: `local-${currentTimestamp()}`,
+      player_name: selectedPlayer.name,
+      player_emoji: selectedPlayer.emoji,
+      user_id: selectedPlayer.id,
+    }
+    storeLocalScore(localRow)
+
+    if (!supabaseClient) {
+      setScoreNotice('บันทึกบนอุปกรณ์นี้แล้ว ตั้งค่า Supabase เพื่อแชร์อันดับกับเพื่อน')
+      return
+    }
+
+    try {
+      const userId = await getAnonymousUserId()
+      const { error } = await supabaseClient.from('logic_scores').insert({
+        ...scoreRun,
+        user_id: userId,
+        player_name: selectedPlayer.name,
+        player_emoji: selectedPlayer.emoji,
+      })
+      if (error) throw error
+      setScoreNotice('ส่งคะแนนขึ้นอันดับเพื่อนแล้ว')
+      setLeaderboardRefresh((current) => current + 1)
+    } catch {
+      setScoreNotice('บันทึกบนอุปกรณ์นี้แล้ว แต่ส่งขึ้นอันดับออนไลน์ไม่สำเร็จ')
+    }
+  }
+
+  async function savePlayerProfile(event) {
+    event.preventDefault()
+    const name = profileName.trim()
+    if (name.length < 2 || name.length > 24) {
+      setProfileError('ชื่อเล่นต้องมี 2–24 ตัวอักษร')
+      return
+    }
+
+    setProfileSaving(true)
+    setProfileError('')
+    try {
+      const id = supabaseClient ? await getAnonymousUserId() : player?.id ?? `local-${crypto.randomUUID()}`
+      const nextPlayer = { id, name, emoji: profileEmoji }
+      localStorage.setItem(playerStorageKey, JSON.stringify(nextPlayer))
+      setPlayer(nextPlayer)
+      setProfileOpen(false)
+      if (pendingScore) {
+        await saveScore(pendingScore, nextPlayer)
+        setPendingScore(null)
+        setPracticeMode('leaderboard')
+      }
+    } catch {
+      setProfileError('สร้างโปรไฟล์ไม่สำเร็จ ลองอีกครั้ง')
+    } finally {
+      setProfileSaving(false)
+    }
+  }
+
+  async function finishFillRun() {
+    const finishedAt = currentTimestamp()
+    const durationMs = Math.max(0, finishedAt - (fillStartedAt ?? finishedAt))
+    const correctCount = correctFillCount
+    const accuracy = Math.round((correctCount / fillRows.length) * 100)
+    const levelBonus = { basic: 0, intermediate: 5, challenge: 10 }[fillLevel]
+    const scoreRun = {
+      score: Math.min(110, accuracy + levelBonus),
+      correct_count: correctCount,
+      total_count: fillRows.length,
+      difficulty: fillLevel,
+      challenge_title: fillProblem?.title ?? fillOperatorDetails.label,
+      challenge_formula: fillFormula,
+      duration_ms: durationMs,
+      completed_at: new Date(finishedAt).toISOString(),
+    }
+
+    setFillFinishedAt(finishedAt)
+    setFillChecked(true)
+    setCompletedRun(scoreRun)
+    setScoreNotice('')
+    if (player) {
+      await saveScore(scoreRun, player)
+    } else {
+      setPendingScore(scoreRun)
+      setProfileName('')
+      setProfileEmoji(playerEmojis[0])
+      setProfileOpen(true)
+    }
   }
 
   return (
@@ -182,7 +432,14 @@ function App() {
       <main className="lesson-main">
         <header className="lesson-topbar">
           <div className="topbar-course"><span>คณิตศาสตร์</span><span className="crumb-slash">/</span><strong>ตรรกศาสตร์เบื้องต้น</strong></div>
-          <div className="topbar-meta"><span className="level-pill">ระดับเริ่มต้น</span><span className="topbar-counter">บทเรียน <strong>{lessons.findIndex((lesson) => lesson.id === activeLesson) + 1}</strong> / 3</span></div>
+          <div className="topbar-meta">
+            <span className="level-pill">ระดับเริ่มต้น</span>
+            <span className="topbar-counter">บทเรียน <strong>{lessons.findIndex((lesson) => lesson.id === activeLesson) + 1}</strong> / 3</span>
+            <button className="player-button" onClick={openProfileEditor} type="button">
+              <span className="player-button-emoji">{player?.emoji ?? <UserRound size={15} />}</span>
+              <span>{player?.name ?? 'ตั้งชื่อผู้เล่น'}</span>
+            </button>
+          </div>
         </header>
 
         <div className="lesson-content">
@@ -292,15 +549,41 @@ function App() {
           {activeLesson === 'practice' && (
             <div className="lesson-panel" key="practice">
               <section className="practice-heading">
-                <div><div className="section-kicker">04 / PRACTICE</div><h2>{practiceMode === 'fill-table' ? 'เติมค่าความจริงในตาราง' : 'ลองคิดก่อนดูเฉลย'}</h2><p>{practiceMode === 'fill-table' ? 'เลือก T หรือ F เติมผลลัพธ์ให้ครบทุกแถว' : `มี ${practiceQuestions.length} ข้อ ครอบคลุมตัวเชื่อมหลัก`}</p></div>
-                <div className="practice-progress"><strong>{practiceMode === 'fill-table' ? filledCount : answeredCount}<span> / {practiceMode === 'fill-table' ? fillRows.length : practiceQuestions.length}</span></strong><small>{practiceMode === 'fill-table' ? 'ช่องที่เติม' : 'ตอบแล้ว'}</small></div>
+                <div><div className="section-kicker">04 / PRACTICE</div><h2>{practiceMode === 'fill-table' ? 'เติมค่าความจริงในตาราง' : practiceMode === 'leaderboard' ? 'อันดับเพื่อน' : 'ลองคิดก่อนดูเฉลย'}</h2><p>{practiceMode === 'fill-table' ? 'เลือก T หรือ F เติมผลลัพธ์ให้ครบทุกแถว' : practiceMode === 'leaderboard' ? 'คะแนน เวลา และระดับโจทย์ของผู้เล่น' : `มี ${practiceQuestions.length} ข้อ ครอบคลุมตัวเชื่อมหลัก`}</p></div>
+                {practiceMode !== 'leaderboard' && <div className="practice-progress"><strong>{practiceMode === 'fill-table' ? filledCount : answeredCount}<span> / {practiceMode === 'fill-table' ? fillRows.length : practiceQuestions.length}</span></strong><small>{practiceMode === 'fill-table' ? 'ช่องที่เติม' : 'ตอบแล้ว'}</small></div>}
               </section>
               <div className="practice-mode-switch" role="group" aria-label="รูปแบบแบบฝึกหัด">
                 <button aria-pressed={practiceMode === 'fill-table'} className={practiceMode === 'fill-table' ? 'mode-active' : ''} onClick={() => setPracticeMode('fill-table')} type="button"><Braces size={16} /> เติมตาราง T/F</button>
                 <button aria-pressed={practiceMode === 'questions'} className={practiceMode === 'questions' ? 'mode-active' : ''} onClick={() => setPracticeMode('questions')} type="button"><Lightbulb size={16} /> เลือกคำตอบ</button>
+                <button aria-pressed={practiceMode === 'leaderboard'} className={practiceMode === 'leaderboard' ? 'mode-active' : ''} onClick={() => setPracticeMode('leaderboard')} type="button"><Trophy size={16} /> อันดับเพื่อน</button>
               </div>
 
-              {practiceMode === 'fill-table' ? (
+              {practiceMode === 'leaderboard' ? (
+                <section className="leaderboard-panel">
+                  <div className="leaderboard-heading">
+                    <div className="leaderboard-title"><span className="leaderboard-icon"><Trophy size={20} /></span><div><strong>ห้องเรียนของเรา</strong><small>เรียงคะแนนสูงสุด แล้วใช้เวลาเป็นตัวตัดสิน</small></div></div>
+                    <span className={`leaderboard-connection ${supabaseClient ? 'connection-online' : 'connection-local'}`}><i />{supabaseClient ? 'อันดับออนไลน์' : 'เฉพาะอุปกรณ์นี้'}</span>
+                  </div>
+                  {!player && <div className="leaderboard-profile-prompt"><span>ตั้งชื่อและเลือกอีโมจิ เพื่อให้เพื่อนจำคุณได้ในตารางคะแนน</span><button onClick={openProfileEditor} type="button">ตั้งโปรไฟล์</button></div>}
+                  {!supabaseClient && <p className="leaderboard-setup-note">ยังไม่ได้เชื่อมฐานคะแนนออนไลน์ คะแนนที่ทำในเครื่องนี้ยังไม่แสดงบนอุปกรณ์ของเพื่อน</p>}
+                  {leaderboardError && <p className="leaderboard-error" role="status">{leaderboardError}</p>}
+                  {leaderboardLoading ? <div className="leaderboard-empty">กำลังโหลดอันดับ...</div> : rankedScores.length ? (
+                    <ol className="leaderboard-list">
+                      {rankedScores.map((entry, index) => (
+                        <li className={`leaderboard-row ${entry.user_id === player?.id ? 'leaderboard-self' : ''}`} key={entry.id ?? `${entry.user_id}-${entry.completed_at}-${index}`}>
+                          <span className={`leaderboard-rank ${index < 3 ? `rank-${index + 1}` : ''}`}>{index === 0 ? <Trophy size={15} /> : index + 1}</span>
+                          <span className="leaderboard-avatar">{entry.player_emoji}</span>
+                          <span className="leaderboard-person"><strong>{entry.player_name}{entry.user_id === player?.id && <small>คุณ</small>}</strong><span>{entry.challenge_title} · {entry.challenge_formula}</span></span>
+                          <span className="leaderboard-difficulty">{fillLevels.find((level) => level.id === entry.difficulty)?.label ?? entry.difficulty}</span>
+                          <span className="leaderboard-score"><strong>{entry.score}</strong><small>คะแนน</small></span>
+                          <span className="leaderboard-time"><Clock3 size={13} />{formatDuration(entry.duration_ms)}</span>
+                        </li>
+                      ))}
+                    </ol>
+                  ) : <div className="leaderboard-empty"><Medal size={24} /><strong>ยังไม่มีคะแนน</strong><span>ทำแบบฝึกหัดตารางแรก แล้วคะแนนจะปรากฏที่นี่</span></div>}
+                  <div className="leaderboard-footer"><span>คะแนน = % คำตอบถูก + โบนัสระดับ (ปานกลาง +5, ท้าทาย +10) · เวลาใช้ตัดสินเมื่อคะแนนเท่ากัน</span><button onClick={() => setLeaderboardRefresh((current) => current + 1)} type="button">รีเฟรชอันดับ</button></div>
+                </section>
+              ) : practiceMode === 'fill-table' ? (
                 <section className="fill-table-exercise">
                   <div className="fill-table-controls">
                     <div className="fill-table-section-label"><span>1</span><strong>เลือกระดับโจทย์</strong></div>
@@ -339,7 +622,7 @@ function App() {
                   </div>
                   <div className="table-heading fill-table-heading">
                     <div><span>ตารางค่าความจริง</span><strong>{fillFormula}</strong></div>
-                    <div className="table-meta"><span className={`difficulty-badge difficulty-${fillLevel}`}>{fillLevels.find((level) => level.id === fillLevel)?.label}</span><span className="row-count">{fillRows.length} แถว</span></div>
+                    <div className="table-meta"><span className={`difficulty-badge difficulty-${fillLevel}`}>{fillLevels.find((level) => level.id === fillLevel)?.label}</span><span className="row-count">{fillRows.length} แถว</span><span className="timer-chip"><Clock3 size={13} />{formatDuration(elapsedMs)}</span></div>
                   </div>
                   {fillProblem && <div className="challenge-hint"><Lightbulb size={16} /><span><strong>แนวคิด:</strong> {fillProblem.hint}</span></div>}
                   <div className="truth-table-wrap fill-table-wrap">
@@ -374,7 +657,7 @@ function App() {
                                 <div className={`fill-answer-slot ${rowState}`}>
                                   <div className="fill-choice-group" role="group" aria-label={`แถว ${index + 1}: ${rowLabel}, เติมค่าความจริง`}>
                                     {[true, false].map((value) => (
-                                      <button aria-label={`แถว ${index + 1}: ${rowLabel}: เลือก ${value ? 'T' : 'F'}`} aria-pressed={selectedValue === value} className={selectedValue === value ? 'fill-choice-selected' : ''} key={String(value)} onClick={() => selectFillAnswer(row, value)} type="button">{value ? 'T' : 'F'}</button>
+                                      <button aria-label={`แถว ${index + 1}: ${rowLabel}: เลือก ${value ? 'T' : 'F'}`} aria-pressed={selectedValue === value} className={selectedValue === value ? 'fill-choice-selected' : ''} disabled={fillChecked} key={String(value)} onClick={() => selectFillAnswer(row, value)} type="button">{value ? 'T' : 'F'}</button>
                                     ))}
                                   </div>
                                   {fillChecked && <span className="fill-row-result">{selectedValue === correctValue ? 'ถูก' : `เฉลย ${correctValue ? 'T' : 'F'}`}</span>}
@@ -386,14 +669,15 @@ function App() {
                       </tbody>
                     </table>
                   </div>
-                  {fillChecked && <div className={`fill-summary ${correctFillCount === fillRows.length ? 'all-correct' : ''}`} role="status"><strong>{correctFillCount === fillRows.length ? 'ถูกต้องครบทุกแถว!' : `ถูก ${correctFillCount} จาก ${fillRows.length} แถว`}</strong><span>{correctFillCount === fillRows.length ? 'ลองเลือกระดับหรือโจทย์ใหม่เพื่อฝึกต่อได้เลย' : 'ช่องที่มีกรอบสีส้มแสดงคำตอบที่ควรแก้'}</span></div>}
+                  {fillChecked && <div className={`fill-summary ${correctFillCount === fillRows.length ? 'all-correct' : ''}`} role="status"><strong>{correctFillCount === fillRows.length ? 'ถูกต้องครบทุกแถว!' : `ถูก ${correctFillCount} จาก ${fillRows.length} แถว`}</strong><span>คะแนน {completedRun?.score ?? 0} · ใช้เวลา {formatDuration(completedRun?.duration_ms ?? 0)} · ระดับ{fillLevels.find((level) => level.id === fillLevel)?.label}</span>{scoreNotice && <small>{scoreNotice}</small>}</div>}
                   <div className="fill-table-actions">
                     <span>{filledCount === fillRows.length ? 'เติมครบแล้ว ตรวจคำตอบได้เลย' : `ยังเหลือ ${fillRows.length - filledCount} ช่อง`}</span>
-                    <div><button className="reset-answer" onClick={resetFillTable} type="button"><RotateCcw size={15} /> ล้างคำตอบ</button><button className="check-answer" disabled={filledCount !== fillRows.length} onClick={() => setFillChecked(true)} type="button">ตรวจตาราง <ChevronRight size={16} /></button></div>
+                    <div>{fillChecked ? <button className="check-answer" onClick={resetFillTable} type="button"><RotateCcw size={15} /> เริ่มรอบใหม่</button> : <><button className="reset-answer" onClick={resetFillTable} type="button"><RotateCcw size={15} /> ล้างคำตอบ</button><button className="check-answer" disabled={filledCount !== fillRows.length} onClick={finishFillRun} type="button">ตรวจตาราง <ChevronRight size={16} /></button></>}</div>
                   </div>
                 </section>
               ) : (
                 <>
+                  <div className="quiz-session-strip"><span><Clock3 size={14} /> เวลา {formatDuration(quizElapsedMs)}</span><span>{answeredCount} / {practiceQuestions.length} ข้อที่ตรวจแล้ว</span></div>
                   <nav className="practice-nav" aria-label="เลือกข้อแบบฝึกหัด">
                     {practiceQuestions.map((question, index) => (
                       <button
@@ -414,22 +698,24 @@ function App() {
                 <div className="answer-label">ประโยคนี้มีค่าความจริงเป็น...</div>
                 <div className="answer-options" role="group" aria-label="เลือกคำตอบ">
                   {[{ value: true, label: 'จริง', symbol: 'T' }, { value: false, label: 'เท็จ', symbol: 'F' }].map((option) => (
-                    <button aria-pressed={currentResponse.answer === option.value} className={`answer-option ${currentResponse.answer === option.value ? 'answer-selected' : ''} ${currentResponse.submitted && currentResponse.answer === option.value ? currentResponse.answer === currentQuestion.answer ? 'answer-correct' : 'answer-wrong' : ''}`} key={option.label} onClick={() => chooseAnswer(option.value)} type="button">
+                    <button aria-pressed={currentResponse.answer === option.value} className={`answer-option ${currentResponse.answer === option.value ? 'answer-selected' : ''} ${currentResponse.submitted && currentResponse.answer === option.value ? currentResponse.answer === currentQuestion.answer ? 'answer-correct' : 'answer-wrong' : ''}`} disabled={Boolean(quizFinishedAt)} key={option.label} onClick={() => chooseAnswer(option.value)} type="button">
                       <span className="answer-symbol">{option.symbol}</span><span>{option.label}</span>{currentResponse.submitted && currentResponse.answer === option.value && currentResponse.answer === currentQuestion.answer && <Check size={16} />}
                     </button>
                   ))}
                 </div>
                 {currentResponse.submitted && <div className={`answer-feedback ${currentResponse.answer === currentQuestion.answer ? 'feedback-correct' : 'feedback-wrong'}`} role="status"><strong>{currentResponse.answer === currentQuestion.answer ? 'ถูกต้อง!' : 'ยังไม่ใช่ ลองทบทวนกฎของตัวเชื่อมนี้'}</strong><span>{currentQuestion.explanation}</span></div>}
                 <div className="question-actions">
-                  <button className="reset-answer" onClick={resetAnswer} type="button"><RotateCcw size={15} /> เริ่มใหม่</button>
+                  <button className="reset-answer" disabled={Boolean(quizFinishedAt)} onClick={resetAnswer} type="button"><RotateCcw size={15} /> ล้างคำตอบ</button>
                   <div className="question-navigation">
                     <button aria-label="ข้อก่อนหน้า" className="question-step-button" onClick={() => changeQuestion(questionIndex - 1)} type="button">ก่อนหน้า</button>
-                    <button className="check-answer" disabled={currentResponse.answer === null} onClick={submitAnswer} type="button">ตรวจคำตอบ</button>
+                    <button className="check-answer" disabled={currentResponse.answer === null || Boolean(quizFinishedAt)} onClick={submitAnswer} type="button">ตรวจคำตอบ</button>
                     <button aria-label="ข้อถัดไป" className="check-answer" onClick={() => changeQuestion(questionIndex + 1)} type="button">ข้อถัดไป <ChevronRight size={16} /></button>
                   </div>
                 </div>
               </section>
               <div className="teacher-tip"><Lightbulb size={17} /><p><strong>จำไว้:</strong> อ่านกฎของตัวเชื่อมก่อน แล้วแทนค่าความจริงของ p และ q ลงไปทีละตัว</p></div>
+              {answeredCount === practiceQuestions.length && !quizFinishedAt && <div className="quiz-finish-prompt"><span><strong>ตอบครบแล้ว</strong> กดจบชุดเพื่อบันทึกคะแนนและเวลาที่ใช้</span><button className="check-answer" onClick={finishQuestionRun} type="button">จบแบบทดสอบ <ChevronRight size={16} /></button></div>}
+              {quizFinishedAt && quizRunResult && <div className="quiz-result-panel" role="status"><div><span className="quiz-result-icon"><Trophy size={18} /></span><span><strong>จบแบบทดสอบแล้ว</strong><small>ระดับพื้นฐาน · ใช้เวลา {formatDuration(quizRunResult.duration_ms)}</small></span></div><strong className="quiz-result-score">{quizRunResult.score}<small> คะแนน</small></strong><p>ตอบถูก {quizRunResult.correct_count} จาก {quizRunResult.total_count} ข้อ{scoreNotice && <span>{scoreNotice}</span>}</p><div><button className="reset-answer" onClick={resetQuestionRun} type="button"><RotateCcw size={15} /> เล่นอีกครั้ง</button><button className="check-answer" onClick={() => setPracticeMode('leaderboard')} type="button">ดูอันดับเพื่อน <Trophy size={15} /></button></div></div>}
                 </>
               )}
             </div>
@@ -438,6 +724,25 @@ function App() {
           <footer className="lesson-footer"><span>LOGIC LAB <span>·</span> เรียนรู้ด้วยการลองคิด</span><span>01 — 03</span></footer>
         </div>
       </main>
+      {profileOpen && (
+        <div className="profile-backdrop">
+          <section aria-labelledby="profile-title" aria-modal="true" className="player-modal" role="dialog">
+            <div className="player-modal-heading">
+              <span className="player-modal-icon"><UserRound size={19} /></span>
+              <div><h2 id="profile-title">โปรไฟล์ผู้เล่น</h2><p>ใช้ชื่อเล่นและอีโมจิแสดงในตารางคะแนน</p></div>
+              <button aria-label="ปิดหน้าต่าง" className="player-modal-close" onClick={() => setProfileOpen(false)} type="button"><X size={18} /></button>
+            </div>
+            <form className="player-form" onSubmit={savePlayerProfile}>
+              <label className="player-name-field"><span>ชื่อเล่น <small>{profileName.trim().length}/24</small></span><input autoFocus maxLength={24} onChange={(event) => setProfileName(event.target.value)} placeholder="เช่น น้องตรรกะ" value={profileName} /></label>
+              <fieldset className="emoji-picker"><legend>เลือกอีโมจิประจำตัว</legend><div>{playerEmojis.map((emoji) => <button aria-label={`เลือก ${emoji}`} aria-pressed={profileEmoji === emoji} className={profileEmoji === emoji ? 'emoji-selected' : ''} key={emoji} onClick={() => setProfileEmoji(emoji)} type="button">{emoji}</button>)}</div></fieldset>
+              {pendingScore && <div className="pending-score-note"><strong>คะแนนรอบนี้ {pendingScore.score}</strong><span>{pendingScore.challenge_title} · {formatDuration(pendingScore.duration_ms)} · ระดับ{fillLevels.find((level) => level.id === pendingScore.difficulty)?.label}</span></div>}
+              <p className="profile-privacy-note">ไม่ต้องใช้รหัสผ่าน ชื่อเล่นและอีโมจินี้จะแสดงต่อทุกคนที่เปิดตารางคะแนน ห้ามใช้ชื่อจริงหรือข้อมูลส่วนตัว</p>
+              {profileError && <p className="profile-error" role="alert">{profileError}</p>}
+              <button className="save-player-button" disabled={profileSaving || profileName.trim().length < 2} type="submit">{profileSaving ? 'กำลังบันทึก...' : player ? 'บันทึกโปรไฟล์' : 'เริ่มใช้ชื่อนี้'} <ChevronRight size={16} /></button>
+            </form>
+          </section>
+        </div>
+      )}
     </div>
   )
 }
