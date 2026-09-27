@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { Fragment, useState } from 'react'
 import { BookOpen, Braces, Check, ChevronRight, FlaskConical, Lightbulb, RotateCcw, Sparkles } from 'lucide-react'
 
 const lessons = [
@@ -15,12 +15,34 @@ const operators = [
   { id: 'iff', symbol: '↔', label: 'ก็ต่อเมื่อ', english: 'IFF', formula: 'p ↔ q', short: 'จริงเมื่อ p และ q มีค่าเหมือนกัน' },
 ]
 
+const fillLevels = [
+  { id: 'basic', label: 'พื้นฐาน', detail: 'ตัวเชื่อมเดี่ยว' },
+  { id: 'intermediate', label: 'ปานกลาง', detail: 'นิพจน์ผสม' },
+  { id: 'challenge', label: 'ท้าทาย', detail: 'นิพจน์หลายชั้น' },
+]
+
+const compoundChallenges = [
+  { id: 'conditional-chain', level: 'intermediate', title: 'เงื่อนไขซ้อน', formula: '(p ∧ q) → r', variables: ['p', 'q', 'r'], hint: 'คำนวณในวงเล็บ p ∧ q ก่อน แล้วจึงประเมิน →', evaluate: ({ p, q, r }) => !(p && q) || r },
+  { id: 'or-biconditional', level: 'intermediate', title: 'หรือและก็ต่อเมื่อ', formula: '(p ∨ q) ↔ ¬r', variables: ['p', 'q', 'r'], hint: 'หาค่า p ∨ q และ ¬r ก่อน แล้วเปรียบเทียบค่าทั้งสองฝั่งของ ↔', evaluate: ({ p, q, r }) => (p || q) === !r },
+  { id: 'nested-negation', level: 'challenge', title: 'วงเล็บและนิเสธ', formula: '¬(p ∨ q) ∧ r', variables: ['p', 'q', 'r'], hint: 'ทำ p ∨ q ในวงเล็บก่อน จากนั้นปฏิเสธผล แล้วจึง AND กับ r', evaluate: ({ p, q, r }) => !(p || q) && r },
+  { id: 'demorgan', level: 'challenge', title: 'กฎของเดอมอร์แกน', formula: '¬(p ∧ q) ↔ (¬p ∨ ¬q)', variables: ['p', 'q'], hint: 'เปรียบเทียบการปฏิเสธของผล AND กับ OR ของตัวปฏิเสธ', evaluate: ({ p, q }) => !(p && q) === (!p || !q) },
+]
+
 function evaluate(operator, p, q) {
   if (operator === 'not') return !p
   if (operator === 'and') return p && q
   if (operator === 'or') return p || q
   if (operator === 'implies') return !p || q
   return p === q
+}
+
+function makeTruthRows(variables) {
+  return Array.from({ length: 2 ** variables.length }, (_, rowIndex) => (
+    Object.fromEntries(variables.map((variable, variableIndex) => [
+      variable,
+      Boolean(((2 ** variables.length - 1 - rowIndex) >> (variables.length - variableIndex - 1)) & 1),
+    ]))
+  ))
 }
 
 const practiceQuestions = [
@@ -41,6 +63,8 @@ function App() {
   const [propositionP, setPropositionP] = useState('วันนี้ฝนตก')
   const [propositionQ, setPropositionQ] = useState('ฉันพกร่ม')
   const [practiceMode, setPracticeMode] = useState('fill-table')
+  const [fillLevel, setFillLevel] = useState('basic')
+  const [fillChallengeId, setFillChallengeId] = useState('conditional-chain')
   const [fillOperator, setFillOperator] = useState('and')
   const [fillAnswers, setFillAnswers] = useState({})
   const [fillChecked, setFillChecked] = useState(false)
@@ -49,6 +73,12 @@ function App() {
 
   const operator = operators.find((item) => item.id === activeOperator)
   const fillOperatorDetails = operators.find((item) => item.id === fillOperator)
+  const fillChallenge = compoundChallenges.find((item) => item.id === fillChallengeId)
+  const isBasicFill = fillLevel === 'basic'
+  const fillProblem = isBasicFill ? null : fillChallenge
+  const fillVariables = fillProblem?.variables ?? (fillOperator === 'not' ? ['p'] : ['p', 'q'])
+  const fillFormula = fillProblem?.formula ?? fillOperatorDetails.formula
+  const fillEvaluation = (row) => fillProblem ? fillProblem.evaluate(row) : evaluate(fillOperator, row.p, row.q)
   const currentQuestion = practiceQuestions[questionIndex]
   const currentOperator = operators.find((item) => item.id === currentQuestion.operator)
   const currentResponse = responses[currentQuestion.id] ?? { answer: null, submitted: false }
@@ -56,12 +86,10 @@ function App() {
   const rows = activeOperator === 'not'
     ? [{ p: true }, { p: false }]
     : [{ p: true, q: true }, { p: true, q: false }, { p: false, q: true }, { p: false, q: false }]
-  const fillRows = fillOperator === 'not'
-    ? [{ p: true }, { p: false }]
-    : [{ p: true, q: true }, { p: true, q: false }, { p: false, q: true }, { p: false, q: false }]
-  const fillRowKey = (row) => `${row.p}-${row.q ?? 'x'}`
+  const fillRows = makeTruthRows(fillVariables)
+  const fillRowKey = (row) => fillVariables.map((variable) => row[variable] ? 'T' : 'F').join('-')
   const filledCount = fillRows.filter((row) => typeof fillAnswers[fillRowKey(row)] === 'boolean').length
-  const correctFillCount = fillRows.filter((row) => fillAnswers[fillRowKey(row)] === evaluate(fillOperator, row.p, row.q)).length
+  const correctFillCount = fillRows.filter((row) => fillAnswers[fillRowKey(row)] === fillEvaluation(row)).length
 
   function resetAnswer() {
     setResponses((current) => {
@@ -91,6 +119,20 @@ function App() {
 
   function changeFillOperator(operatorId) {
     setFillOperator(operatorId)
+    setFillAnswers({})
+    setFillChecked(false)
+  }
+
+  function changeFillLevel(level) {
+    const firstChallenge = compoundChallenges.find((challenge) => challenge.level === level)
+    setFillLevel(level)
+    if (firstChallenge) setFillChallengeId(firstChallenge.id)
+    setFillAnswers({})
+    setFillChecked(false)
+  }
+
+  function changeFillChallenge(challengeId) {
+    setFillChallengeId(challengeId)
     setFillAnswers({})
     setFillChecked(false)
   }
@@ -261,44 +303,78 @@ function App() {
               {practiceMode === 'fill-table' ? (
                 <section className="fill-table-exercise">
                   <div className="fill-table-controls">
-                    <div className="fill-table-section-label"><span>1</span><strong>เลือกตัวเชื่อม</strong></div>
-                    <div className="operator-picker fill-operator-picker" role="group" aria-label="เลือกตัวเชื่อมสำหรับแบบฝึกหัด">
-                      {operators.map((item) => (
-                        <button aria-pressed={fillOperator === item.id} className={`operator-option ${fillOperator === item.id ? 'chosen' : ''}`} key={item.id} onClick={() => changeFillOperator(item.id)} type="button">
-                          <span>{item.symbol}</span><small>{item.label}</small>
+                    <div className="fill-table-section-label"><span>1</span><strong>เลือกระดับโจทย์</strong></div>
+                    <div className="fill-level-picker" role="group" aria-label="เลือกระดับความยาก">
+                      {fillLevels.map((level) => (
+                        <button aria-pressed={fillLevel === level.id} className={`fill-level-option ${fillLevel === level.id ? 'level-selected' : ''}`} key={level.id} onClick={() => changeFillLevel(level.id)} type="button">
+                          <strong>{level.label}</strong><small>{level.detail}</small>
                         </button>
                       ))}
                     </div>
+                    {isBasicFill ? (
+                      <div className="basic-operator-picker">
+                        <span className="picker-caption">เลือกตัวเชื่อม</span>
+                        <div className="operator-picker fill-operator-picker" role="group" aria-label="เลือกตัวเชื่อมสำหรับแบบฝึกหัด">
+                          {operators.map((item) => (
+                            <button aria-pressed={fillOperator === item.id} className={`operator-option ${fillOperator === item.id ? 'chosen' : ''}`} key={item.id} onClick={() => changeFillOperator(item.id)} type="button">
+                              <span>{item.symbol}</span><small>{item.label}</small>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="fill-challenge-picker" role="group" aria-label="เลือกโจทย์นิพจน์ผสม">
+                        {compoundChallenges.filter((challenge) => challenge.level === fillLevel).map((challenge) => (
+                          <button aria-pressed={fillChallengeId === challenge.id} className={`fill-challenge-option ${fillChallengeId === challenge.id ? 'challenge-selected' : ''}`} key={challenge.id} onClick={() => changeFillChallenge(challenge.id)} type="button">
+                            <span>{challenge.title}</span><strong>{challenge.formula}</strong>
+                          </button>
+                        ))}
+                      </div>
+                    )}
                   </div>
                   <div className="fill-table-instruction">
                     <div className="fill-table-section-label"><span>2</span><strong>เติมผลลัพธ์</strong></div>
-                    <p>ในแต่ละแถว เลือก <b>T</b> หรือ <b>F</b> ให้ตรงกับตัวเชื่อม</p>
+                    <p>เติม <b>T</b> หรือ <b>F</b> ในทุกแถว โดยคำนวณจากนิพจน์ด้านบน</p>
                     <span className="truth-key-chip"><b>T</b> = จริง <i>·</i> <b>F</b> = เท็จ</span>
                   </div>
                   <div className="table-heading fill-table-heading">
-                    <div><span>ตารางค่าความจริง</span><strong>{fillOperatorDetails.formula}</strong></div>
-                    <span className="row-count">{fillRows.length} ช่อง</span>
+                    <div><span>ตารางค่าความจริง</span><strong>{fillFormula}</strong></div>
+                    <div className="table-meta"><span className={`difficulty-badge difficulty-${fillLevel}`}>{fillLevels.find((level) => level.id === fillLevel)?.label}</span><span className="row-count">{fillRows.length} แถว</span></div>
                   </div>
+                  {fillProblem && <div className="challenge-hint"><Lightbulb size={16} /><span><strong>แนวคิด:</strong> {fillProblem.hint}</span></div>}
                   <div className="truth-table-wrap fill-table-wrap">
-                    <table className={`truth-table fill-truth-table ${fillOperator === 'not' ? 'unary-truth-table' : 'binary-truth-table'}`}>
-                      <thead><tr><th>p</th>{fillOperator !== 'not' && <th aria-label={`ตัวเชื่อม ${fillOperatorDetails.label}`} className="connective-column">{fillOperatorDetails.symbol}</th>}{fillOperator !== 'not' && <th>q</th>}<th className="result-column">เติมผลลัพธ์</th></tr></thead>
+                    <table className={`truth-table fill-truth-table ${fillVariables.length > 2 ? 'three-variable-table' : fillVariables.length === 1 ? 'unary-truth-table' : 'binary-truth-table'}`}>
+                      <thead>
+                        <tr>
+                          {fillVariables.map((variable, index) => (
+                            <Fragment key={variable}>
+                              <th className={`variable-heading variable-${variable}`}>{variable}</th>
+                              {isBasicFill && fillOperator !== 'not' && index === 0 && <th aria-label={`ตัวเชื่อม ${fillOperatorDetails.label}`} className="connective-column">{fillOperatorDetails.symbol}</th>}
+                            </Fragment>
+                          ))}
+                          <th className="result-column">เติมผลลัพธ์</th>
+                        </tr>
+                      </thead>
                       <tbody>
                         {fillRows.map((row, index) => {
                           const rowKey = fillRowKey(row)
-                          const correctValue = evaluate(fillOperator, row.p, row.q)
+                          const correctValue = fillEvaluation(row)
                           const selectedValue = fillAnswers[rowKey]
                           const rowState = fillChecked ? selectedValue === correctValue ? 'fill-correct' : 'fill-incorrect' : selectedValue === undefined ? 'fill-empty' : 'fill-selected'
-                          const rowLabel = `แถว ${index + 1}: p ${row.p ? 'T' : 'F'}${row.q === undefined ? '' : `, q ${row.q ? 'T' : 'F'}`}`
+                          const rowLabel = fillVariables.map((variable) => `${variable} ${row[variable] ? 'T' : 'F'}`).join(', ')
                           return (
                             <tr key={rowKey}>
-                              <td><span className={`table-value ${row.p ? 'value-true' : 'value-false'}`}>{row.p ? 'T' : 'F'}</span></td>
-                              {fillOperator !== 'not' && <td aria-label={`ตัวเชื่อม ${fillOperatorDetails.label}`} className="connective-column">{fillOperatorDetails.symbol}</td>}
-                              {fillOperator !== 'not' && <td><span className={`table-value ${row.q ? 'value-true' : 'value-false'}`}>{row.q ? 'T' : 'F'}</span></td>}
+                              {fillVariables.map((variable, variableIndex) => (
+                                <Fragment key={variable}>
+                                  <td><span className={`table-value variable-value variable-${variable} ${row[variable] ? 'value-true' : 'value-false'}`}>{row[variable] ? 'T' : 'F'}</span></td>
+                                  {isBasicFill && fillOperator !== 'not' && variableIndex === 0 && <td aria-label={`ตัวเชื่อม ${fillOperatorDetails.label}`} className="connective-column">{fillOperatorDetails.symbol}</td>}
+                                </Fragment>
+                              ))}
                               <td className="result-column">
                                 <div className={`fill-answer-slot ${rowState}`}>
-                                  <div className="fill-choice-group" role="group" aria-label={`${rowLabel}, เติมค่าความจริง`}>
+                                  <div className="fill-choice-group" role="group" aria-label={`แถว ${index + 1}: ${rowLabel}, เติมค่าความจริง`}>
                                     {[true, false].map((value) => (
-                                      <button aria-label={`${rowLabel}: เลือก ${value ? 'T' : 'F'}`} aria-pressed={selectedValue === value} className={selectedValue === value ? 'fill-choice-selected' : ''} key={String(value)} onClick={() => selectFillAnswer(row, value)} type="button">{value ? 'T' : 'F'}</button>
+                                      <button aria-label={`แถว ${index + 1}: ${rowLabel}: เลือก ${value ? 'T' : 'F'}`} aria-pressed={selectedValue === value} className={selectedValue === value ? 'fill-choice-selected' : ''} key={String(value)} onClick={() => selectFillAnswer(row, value)} type="button">{value ? 'T' : 'F'}</button>
                                     ))}
                                   </div>
                                   {fillChecked && <span className="fill-row-result">{selectedValue === correctValue ? 'ถูก' : `เฉลย ${correctValue ? 'T' : 'F'}`}</span>}
@@ -310,7 +386,7 @@ function App() {
                       </tbody>
                     </table>
                   </div>
-                  {fillChecked && <div className={`fill-summary ${correctFillCount === fillRows.length ? 'all-correct' : ''}`} role="status"><strong>{correctFillCount === fillRows.length ? 'ถูกต้องครบทุกแถว!' : `ถูก ${correctFillCount} จาก ${fillRows.length} แถว`}</strong><span>{correctFillCount === fillRows.length ? 'ลองเปลี่ยนตัวเชื่อมเพื่อฝึกต่อได้เลย' : 'ช่องที่มีกรอบสีส้มแสดงคำตอบที่ควรแก้'}</span></div>}
+                  {fillChecked && <div className={`fill-summary ${correctFillCount === fillRows.length ? 'all-correct' : ''}`} role="status"><strong>{correctFillCount === fillRows.length ? 'ถูกต้องครบทุกแถว!' : `ถูก ${correctFillCount} จาก ${fillRows.length} แถว`}</strong><span>{correctFillCount === fillRows.length ? 'ลองเลือกระดับหรือโจทย์ใหม่เพื่อฝึกต่อได้เลย' : 'ช่องที่มีกรอบสีส้มแสดงคำตอบที่ควรแก้'}</span></div>}
                   <div className="fill-table-actions">
                     <span>{filledCount === fillRows.length ? 'เติมครบแล้ว ตรวจคำตอบได้เลย' : `ยังเหลือ ${fillRows.length - filledCount} ช่อง`}</span>
                     <div><button className="reset-answer" onClick={resetFillTable} type="button"><RotateCcw size={15} /> ล้างคำตอบ</button><button className="check-answer" disabled={filledCount !== fillRows.length} onClick={() => setFillChecked(true)} type="button">ตรวจตาราง <ChevronRight size={16} /></button></div>
